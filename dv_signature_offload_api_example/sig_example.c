@@ -134,6 +134,8 @@ struct {
 	.corrupt_ref_tag	= 0,
 };
 
+static bool check_copy_en_mask = false;
+
 static inline int is_client()
 {
 	return config.dst_addr.ss_family;
@@ -180,7 +182,12 @@ static int is_sig_supported(struct ibv_context *ibv_ctx,
 		return -1;
 	}
 
+	if (!(ctx.sig_caps.block_prot & prot))
+		return 0;
+
 	switch (prot) {
+	case MLX5DV_SIG_PROT_CAP_NVMEDIF:
+		return 1;
 	case MLX5DV_SIG_PROT_CAP_T10DIF:
 		if (!(ctx.sig_caps.t10dif_bg & sig))
 			return 0;
@@ -686,6 +693,20 @@ static int reg_sig_mkey(struct resources *res, enum sig_mode mode)
 		break;
 	}
 
+	if (check_copy_en_mask) {
+		sig_attr.comp_mask = MLX5DV_SIG_CHECK_COPY_EN_COMP_MASK;
+		sig_attr.check_mask = 0;
+		sig_attr.check_copy_en.guard_check_en = 1;
+		sig_attr.check_copy_en.ref_tag_check_en = 1;
+		sig_attr.check_copy_en.app_tag_check_en = 1;
+		if ((mem.sig_type == wire.sig_type) &&
+		    (mem.block_size == wire.block_size)) {
+			sig_attr.check_copy_en.guard_copy_en = 1;
+			sig_attr.check_copy_en.ref_tag_copy_en = 1;
+			sig_attr.check_copy_en.app_tag_copy_en = 3;
+		}
+	};
+
 	if (configure_sig_mkey(res, mode, &sig_attr))
 		return -1;
 
@@ -972,6 +993,14 @@ static int resources_create(struct resources *res)
 
 	if (!mlx5dv_is_supported(res->ib_ctx->device)) {
 		err("device %s doesn't support DV\n",
+		    ibv_get_device_name(res->ib_ctx->device));
+		skip = true;
+		goto err_exit;
+	}
+
+	if (check_copy_en_mask &&
+	    !is_sig_supported(res->ib_ctx, MLX5DV_SIG_PROT_CAP_NVMEDIF, 0)) {
+		err("Device %s doesn't support check_copy_en_mask\n",
 		    ibv_get_device_name(res->ib_ctx->device));
 		skip = true;
 		goto err_exit;
@@ -1530,6 +1559,7 @@ static void print_config(void)
 	info(" Corrupt app_tag : %d\n", config.corrupt_app_tag);
 	info(" Corrupt ref_tag : %d\n", config.corrupt_ref_tag);
 	info(" Corrupt offset : %d\n", config.corrupt_offset);
+	info(" check_copy_en_mask : %s\n", check_copy_en_mask ? "Enabled" : "Disabled");
 	info(" ----------------------------------------------\n\n");
 }
 
@@ -1555,6 +1585,9 @@ static void usage(const char *argv0)
 					   "read operation (only for t10dif)\n");
 	info(" -f, --corrupt-offset         Corrupt at specified linear offset (view in the wire domain) for "
 					   "READ read operation\n");
+	info(" -m, --enable-check-copy-en-mask	Enable the SIG_CHECK_COPY_EN_COMP_MASK, so that in mlx5dv_sig_block_attr structure, "
+						"the 'check_copy_en' field will be enabled, and the 'check_mask' and 'copy_mask' fields will be "
+						"ignored. This is the preferred way to configure a block signature.\n");
 }
 
 static int get_sockaddr(const char *host, struct sockaddr *addr)
@@ -1600,10 +1633,11 @@ int main(int argc, char *argv[])
 			{ .name = "corrupt-app-tag",	.has_arg = 0, .val = 'a' },
 			{ .name = "corrupt-ref-tag",	.has_arg = 0, .val = 'r' },
 			{ .name = "corrupt-offset",	.has_arg = 1, .val = 'f' },
+			{ .name = "enable-check-copy-en-mask",	.has_arg = 0, .val = 'm' },
 			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hS:p:b:n:os:carf:", long_options, NULL);
+		c = getopt_long(argc, argv, "hS:p:b:n:os:carmf:", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -1665,6 +1699,9 @@ int main(int argc, char *argv[])
 				usage(argv[0]);
 				return -1;
 			}
+			break;
+		case 'm':
+			check_copy_en_mask = true;
 			break;
 		default:
 			err("option -%c is not supported\n", c);

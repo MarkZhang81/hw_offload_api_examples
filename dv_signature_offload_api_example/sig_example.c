@@ -135,6 +135,7 @@ struct {
 };
 
 static bool check_copy_en_mask = false;
+static unsigned int nvmedif_sts = 24;
 
 static inline int is_client()
 {
@@ -272,6 +273,18 @@ static void dump_pi_t10dif(void *pi_ptr)
 	     ntohs(pi->guard), ntohs(pi->app_tag), ntohl(pi->ref_tag));
 }
 
+static void dump_pi_nvmedif16(void *pi_ptr)
+{
+}
+
+static void dump_pi_nvmedif32(void *pi_ptr)
+{
+}
+
+static void dump_pi_nvmedif64(void *pi_ptr)
+{
+}
+
 static void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain,
 					  void *sig)
 {
@@ -313,9 +326,130 @@ static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain,
 				     MLX5DV_BLOCK_SIZE_4096;
 }
 
+#define NVMEDIF16_STS_MAX 32
+#define NVMEDIF32_STS_MIN 16
+#define NVMEDIF32_STS_MAX 64
+#define NVMEDIF64_STS_MAX 48
+
+static void set_sig_domain_nvmedif(struct mlx5dv_sig_block_domain *domain,
+				   struct mlx5dv_sig_nvmedif *dif,
+				   enum mlx5dv_sig_nvmedif_format format,
+				   uint64_t seed, uint64_t ref_tag,
+				   uint64_t storage_tag, uint8_t sts)
+{
+	domain->sig_type = MLX5DV_SIG_TYPE_NVMEDIF;
+	domain->sig.nvmedif = dif;
+	domain->block_size = config.block_size;
+
+	dif->format = format;
+	dif->seed = seed;
+	dif->storage_tag = storage_tag;
+	dif->ref_tag = ref_tag;
+	dif->sts = sts;
+
+	dif->flags = MLX5DV_SIG_NVMEDIF_FLAG_APP_REF_ESCAPE;
+	dif->app_tag = 0x5678;
+	dif->app_tag_check = 0xf;
+	dif->storage_tag_check = 0x3f;
+}
+
+static void set_sig_domain_nvmedif16(struct mlx5dv_sig_block_domain *domain,
+				     void *sig)
+{
+	uint64_t ref_tag = 0xdeadbeef, storage_tag = 0xbeefdead;
+
+	if (nvmedif_sts) {
+		storage_tag &= (1ULL << nvmedif_sts) - 1;
+		ref_tag &= (1ULL << (NVMEDIF16_STS_MAX - nvmedif_sts)) - 1;
+	} else {
+		storage_tag = 0;
+	}
+
+	set_sig_domain_nvmedif(domain, sig, MLX5DV_NVMEDIF16,
+			       UINT16_MAX, ref_tag, storage_tag, nvmedif_sts);
+}
+
+static void set_sig_domain_nvmedif32(struct mlx5dv_sig_block_domain *domain,
+				     void *sig)
+{
+	uint64_t ref_tag = 0xdeadbeefdeadbeef, storage_tag = 0xbeefdeadbeefdead;
+
+	if (nvmedif_sts == NVMEDIF32_STS_MAX) {
+		ref_tag = 0;
+	} else {
+		storage_tag &= (1ULL << nvmedif_sts) - 1;
+		ref_tag &= (1ULL << (NVMEDIF16_STS_MAX - nvmedif_sts)) - 1;
+	}
+
+	set_sig_domain_nvmedif(domain, sig, MLX5DV_NVMEDIF32,
+			       UINT32_MAX, ref_tag, storage_tag, nvmedif_sts);
+}
+
+static void set_sig_domain_nvmedif64(struct mlx5dv_sig_block_domain *domain,
+				     void *sig)
+{
+	uint64_t ref_tag = 0xbeefdeadbeef, storage_tag = 0xdeadbeefdead;
+
+	if (nvmedif_sts) {
+		storage_tag &= (1ULL << nvmedif_sts) - 1;
+		ref_tag &= (1ULL << (NVMEDIF16_STS_MAX - nvmedif_sts)) - 1;
+	} else {
+		storage_tag = 0;
+	}
+
+	set_sig_domain_nvmedif(domain, sig, MLX5DV_NVMEDIF64,
+			       UINT64_MAX, ref_tag, storage_tag, nvmedif_sts);
+}
+
+static bool verify_config_nvmedif16(void)
+{
+	if (nvmedif_sts > NVMEDIF16_STS_MAX) {
+		err("Invalid storage size %d\n", nvmedif_sts);
+		return false;
+	}
+
+	return true;
+}
+
+static bool verify_config_nvmedif32(void)
+{
+	if ((nvmedif_sts < NVMEDIF32_STS_MAX) ||
+	    (nvmedif_sts > NVMEDIF32_STS_MAX)) {
+		err("Invalid storage size %d\n", nvmedif_sts);
+		return false;
+	}
+
+	if (config.block_size < MLX5DV_BLOCK_SIZE_4096) {
+		err("Invalid block size %d\n", config.block_size);
+		return false;
+	}
+
+	return true;
+}
+
+static bool verify_config_nvmedif64(void)
+{
+	if (nvmedif_sts > NVMEDIF64_STS_MAX) {
+		err("Invalid storage size %d\n", nvmedif_sts);
+		return false;
+	}
+
+	if (config.block_size < MLX5DV_BLOCK_SIZE_4096) {
+		err("Invalid block size %d\n", config.block_size);
+		return false;
+	}
+
+	return true;
+}
+
 static int is_t10dif_supported(struct ibv_context *ctx)
 {
 	return is_sig_supported(ctx, MLX5DV_SIG_PROT_CAP_T10DIF, MLX5DV_SIG_T10DIF_BG_CAP_CRC);
+}
+
+static int is_nvmedif_supported(struct ibv_context *ctx)
+{
+	return is_sig_supported(ctx, MLX5DV_SIG_PROT_CAP_NVMEDIF, 0);
 }
 
 enum signature_types {
@@ -324,6 +458,10 @@ enum signature_types {
 	SIG_TYPE_T10DIF_TYPE1,
 	SIG_TYPE_T10DIF_TYPE2,
 	SIG_TYPE_T10DIF_TYPE3,
+
+	SIG_TYPE_NVMEDIF16,
+	SIG_TYPE_NVMEDIF32,
+	SIG_TYPE_NVMEDIF64,
 
 	SIG_TYPE_MAX,
 };
@@ -335,6 +473,7 @@ struct signature_ops {
 	void		(*dump_pi)(void *pi);
 	uint8_t		check_mask;
 	int		(*is_supported)(struct ibv_context *ctx);
+	bool		(*verify_config)(void);
 };
 
 const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
@@ -383,6 +522,30 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
 				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
 		.is_supported	= is_t10dif_supported,
+	},
+	[SIG_TYPE_NVMEDIF16] = {
+		.name		= "nvmedif16",
+		.pi_size	= 8,
+		.set_sig_domain	= set_sig_domain_nvmedif16,
+		.dump_pi	= dump_pi_nvmedif16,
+		.is_supported	= is_nvmedif_supported,
+		.verify_config	= verify_config_nvmedif16,
+	},
+	[SIG_TYPE_NVMEDIF32] = {
+		.name		= "nvmedif32",
+		.pi_size	= 16,
+		.set_sig_domain	= set_sig_domain_nvmedif32,
+		.dump_pi	= dump_pi_nvmedif32,
+		.is_supported	= is_nvmedif_supported,
+		.verify_config	= verify_config_nvmedif32,
+	},
+	[SIG_TYPE_NVMEDIF64] = {
+		.name		= "nvmedif64",
+		.pi_size	= 16,
+		.set_sig_domain	= set_sig_domain_nvmedif64,
+		.dump_pi	= dump_pi_nvmedif64,
+		.is_supported	= is_nvmedif_supported,
+		.verify_config	= verify_config_nvmedif64,
 	},
 };
 
@@ -664,10 +827,12 @@ static int configure_sig_mkey(struct resources *res,
 static int reg_sig_mkey(struct resources *res, enum sig_mode mode)
 {
 	union {
+		struct mlx5dv_sig_nvmedif nvmedif;
 		struct mlx5dv_sig_t10dif t10dif;
 		struct mlx5dv_sig_crc crc;
 	} mem_sig;
 	union {
+		struct mlx5dv_sig_nvmedif nvmedif;
 		struct mlx5dv_sig_t10dif t10dif;
 		struct mlx5dv_sig_crc crc;
 	} wire_sig;
@@ -699,12 +864,18 @@ static int reg_sig_mkey(struct resources *res, enum sig_mode mode)
 		sig_attr.check_copy_en.guard_check_en = 1;
 		sig_attr.check_copy_en.ref_tag_check_en = 1;
 		sig_attr.check_copy_en.app_tag_check_en = 1;
+		if ((mem.sig_type == MLX5DV_SIG_TYPE_NVMEDIF) ||
+		    (wire.sig_type == MLX5DV_SIG_TYPE_NVMEDIF))
+			sig_attr.check_copy_en.storage_tag_check_en = 1;
 		if ((mem.sig_type == wire.sig_type) &&
 		    (mem.block_size == wire.block_size)) {
 			sig_attr.check_copy_en.guard_copy_en = 1;
 			sig_attr.check_copy_en.ref_tag_copy_en = 1;
 			sig_attr.check_copy_en.app_tag_copy_en = 3;
+			if (mem.sig_type == MLX5DV_SIG_TYPE_NVMEDIF)
+				sig_attr.check_copy_en.storage_tag_copy_en = 0xff;
 		}
+
 	};
 
 	if (configure_sig_mkey(res, mode, &sig_attr))
@@ -1577,7 +1748,7 @@ static void usage(const char *argv0)
 	info(" -n, --number-of-blocks <NB>  Number of blocks per RDMA operation (default 8)\n");
 	info(" -o, --interleave             Data blocks and protection blocks are interleaved in the same buf\n");
 	info(" -s, --sig-type <type>        Supported signature types: crc32, crc32c, t10dif-type1, t10dif-type2, "
-					   "t10dif-type3 (default crc32)\n");
+					   "t10dif-type3, nvmedif16, nvmedif32, nvmedif64 (default crc32). For nvmedif types, \"-m\" must be used.\n");
 	info(" -c, --corrupt-data           Corrupt data (i.e., corrupt-offset = 0)  for READ read operation\n");
 	info(" -a, --corrupt-app-tag        Corrupt apptag (i.e., corrupt-offset = block-size + 2) for READ "
 					   "read operation (only for t10dif)\n");
@@ -1588,6 +1759,7 @@ static void usage(const char *argv0)
 	info(" -m, --enable-check-copy-en-mask	Enable the SIG_CHECK_COPY_EN_COMP_MASK, so that in mlx5dv_sig_block_attr structure, "
 						"the 'check_copy_en' field will be enabled, and the 'check_mask' and 'copy_mask' fields will be "
 						"ignored. This is the preferred way to configure a block signature.\n");
+	info("-t, --storage-tag-size	The storage tag size in bits for nvmedif signature type.\n");
 }
 
 static int get_sockaddr(const char *host, struct sockaddr *addr)
@@ -1634,10 +1806,11 @@ int main(int argc, char *argv[])
 			{ .name = "corrupt-ref-tag",	.has_arg = 0, .val = 'r' },
 			{ .name = "corrupt-offset",	.has_arg = 1, .val = 'f' },
 			{ .name = "enable-check-copy-en-mask",	.has_arg = 0, .val = 'm' },
+			{ .name = "storage-tag-size",	.has_arg = 1, .val = 't' },
 			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hS:p:b:n:os:carmf:", long_options, NULL);
+		c = getopt_long(argc, argv, "hS:p:b:n:os:carmf:t:", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -1703,6 +1876,9 @@ int main(int argc, char *argv[])
 		case 'm':
 			check_copy_en_mask = true;
 			break;
+		case 't':
+			nvmedif_sts = strtol(optarg, NULL, 0);
+			break;
 		default:
 			err("option -%c is not supported\n", c);
 			return -1;
@@ -1742,6 +1918,9 @@ int main(int argc, char *argv[])
 		else if (config.corrupt_data)
 			config.corrupt_offset = 0;
 	}
+
+	if (config.sig->verify_config && !config.sig->verify_config())
+		return -1;
 
 	print_config();
 
